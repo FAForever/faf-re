@@ -29,6 +29,7 @@ jobs:
       actions: read  # the parity run's report
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
+      previous: ${{ steps.plan.outputs.previous }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -122,7 +123,7 @@ jobs:
 
   release:
     environment: deploy
-    needs: [build]
+    needs: [plan, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write  # the release and its tag
@@ -149,7 +150,6 @@ jobs:
         run: |
           # The exes also ship on their own, for replacing one that is already installed.
           (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip main*.exe > SHA256SUMS.txt)
-          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           python tools/release/nightly_notes.py --out notes.md --player-notes player-notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
@@ -164,6 +164,7 @@ jobs:
           SHA: ${{ github.sha }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
+          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           gh release create "$TAG" zips/faf-engine-*.zip zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
             --title "$TAG x64\\x86\\Linux" --notes-file notes.md
           gh release view "$TAG" --json tagName,isPrerelease,url | tee -a "$GITHUB_STEP_SUMMARY"
