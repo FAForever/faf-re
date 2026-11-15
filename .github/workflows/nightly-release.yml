@@ -287,7 +287,7 @@ jobs:
           SHA: ${{ needs.plan.outputs.sha }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          gh release create "$TAG" zips/faf-engine-*.zip zips/faf-engine-*.tar.gz zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
+          gh release create "$TAG" zips/faf-engine-*.zip zips/faf-engine-*.tar.gz zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --prerelease \
             --title "$TAG x64\\x86\\Linux" --notes-file notes.md
           gh release view "$TAG" --json tagName,isPrerelease,url | tee -a "$GITHUB_STEP_SUMMARY"
 
