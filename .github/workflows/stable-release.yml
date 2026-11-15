@@ -126,7 +126,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write  # the release and its tag
-      actions: read  # the parity run's report
     steps:
       - uses: actions/checkout@v7
         with:
@@ -148,8 +147,9 @@ jobs:
           PARITY_RUN: ${{ github.event.workflow_run.id || inputs.parity_run }}
           PARITY_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id || inputs.parity_run }}
         run: |
+          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           # The exes also ship on their own, for replacing one that is already installed.
-          (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip faf-engine-*.tar.gz main*.exe > SHA256SUMS.txt)
+          (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip main*.exe > SHA256SUMS.txt)
           python tools/release/nightly_notes.py --out notes.md --player-notes player-notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
@@ -164,9 +164,6 @@ jobs:
           SHA: ${{ github.sha }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          curl -f -X "POST"
-          "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}"
-          -F "file=@zips/main.exe"
-          gh release create "$TAG" zips/faf-engine-*.zip zips/faf-engine-*.tar.gz zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
+          gh release create "$TAG" zips/faf-engine-*.zip zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
             --title "$TAG x64\\x86\\Linux" --notes-file notes.md
           gh release view "$TAG" --json tagName,isPrerelease,url | tee -a "$GITHUB_STEP_SUMMARY"
