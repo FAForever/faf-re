@@ -147,9 +147,9 @@ jobs:
           PARITY_RUN: ${{ github.event.workflow_run.id || inputs.parity_run }}
           PARITY_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id || inputs.parity_run }}
         run: |
-          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           # The exes also ship on their own, for replacing one that is already installed.
           (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip main*.exe > SHA256SUMS.txt)
+          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           python tools/release/nightly_notes.py --out notes.md --player-notes player-notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
