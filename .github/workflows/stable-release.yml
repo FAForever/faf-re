@@ -166,5 +166,5 @@ jobs:
         run: |
           curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
           gh release create "$TAG" zips/faf-engine-*.zip zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
-            --title "$TAG x64\\x86\\Linux" --notes-file notes.md
+            --title "$TAG x86" --notes-file notes.md
           gh release view "$TAG" --json tagName,isPrerelease,url | tee -a "$GITHUB_STEP_SUMMARY"

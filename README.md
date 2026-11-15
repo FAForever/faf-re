@@ -112,7 +112,7 @@ Visual Studio 18 does not work: its static runtime imports a DLL that the `headl
 ### Building
 
 ```powershell
-git clone --recursive https://github.com/Draiget/faf-re.git
+git clone --recursive https://github.com/FAForever/faf-re.git
 cd faf-re
 .\build.ps1
 ```
