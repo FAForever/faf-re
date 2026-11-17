@@ -58,6 +58,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - arch: x64
+            exe: main_x64
           - arch: x86
             exe: main
     steps:
@@ -121,9 +123,53 @@ jobs:
           path: faf-engine-*.zip
           retention-days: 7
 
+  # The native Linux engine (the Linux client, FAF_LINUX_CLIENT, issue #255) with the pinned toolchain
+  # (cmake/toolchains/linux-clang-pins.cmake, on Ubuntu 22.04) and the headers SDL3 builds its X11,
+  # Wayland and audio backends against. It links its libraries in and needs glibc 2.34 at run time
+  # (issue #394; tools/release/linux/package.sh checks it). A .tar.gz, as a zip would lose the
+  # executable bit.
+  build-linux:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+    steps:
+      # git for the checkout, zstd for the caches the runner's own jobs compress with it.
+      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates zstd
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash tools/linux/toolchain.sh --client
+      - uses: actions/cache/restore@v6
+        with:
+          path: dependencies/.downloads
+          key: deps-${{ hashFiles('cmake/FafDependencies.cmake') }}
+      # The simulation's dependencies and the client's submodules; the client's configure fetches its downloads.
+      - run: cmake -DFAF_DEPENDENCIES_ONLY="WildMagic3p8;zlib-1.2.3;monocypher;zstd;vulkan;ffmpeg" -P cmake/FafDependencies.cmake
+      # The tag exists only here until the release creates it: the engine reports it as its version.
+      - env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          git tag "$TAG" HEAD
+          cmake --preset linux-clang-x64-release-plain -DFAF_LINUX_CLIENT=ON
+          cmake --build --preset linux-clang-x64-release-plain --target faf_client
+      - env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: bash tools/release/linux/package.sh build/linux-clang-x64-release-plain "$TAG" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zip-linux-x64
+          path: faf-engine-*.tar.gz
+          retention-days: 7
+
   release:
     environment: deploy
-    needs: [plan, build]
+    needs: [plan, build, build-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write  # the release and its tag
@@ -149,7 +195,7 @@ jobs:
           PARITY_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id || inputs.parity_run }}
         run: |
           # The exes also ship on their own, for replacing one that is already installed.
-          (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip main*.exe > SHA256SUMS.txt)
+          (cd zips && for z in faf-engine-*.zip; do unzip -j -o "$z" 'main*.exe'; done && sha256sum faf-engine-*.zip faf-engine-*.tar.gz main*.exe > SHA256SUMS.txt)
           python tools/release/nightly_notes.py --out notes.md --player-notes player-notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
@@ -164,7 +210,7 @@ jobs:
           SHA: ${{ github.sha }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main.exe"
+          curl -f -X "POST" "https://api.faforever.com/exe/upload" -F "modName=fafdevelop" -F "apiKey=${{ secrets.apiKey }}" -F "file=@zips/main_x64.exe"
           gh release create "$TAG" zips/faf-engine-*.zip zips/main*.exe zips/SHA256SUMS.txt player-notes.md --target "$SHA" --latest \
             --title "$TAG x86" --notes-file notes.md
           gh release view "$TAG" --json tagName,isPrerelease,url | tee -a "$GITHUB_STEP_SUMMARY"
