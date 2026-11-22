@@ -130,23 +130,15 @@ namespace faf::editor
       }
       return true;
     }
-
-    float LinearOf(
-      const float c
-    )
-    {
-      return std::pow(std::max(c, 0.0001f), 2.2f);
-    }
   } // namespace
 
-  bool EdMapScene::BakeMeshMaterial(
+  std::expected<EdMapScene::MeshMaterialView, std::string> EdMapScene::BakeMeshMaterial(
     const int materialIndex,
     const std::filesystem::path& folder,
-    const std::string& vfs,
-    MeshMaterialView& out,
-    std::string& why
+    const std::string& vfs
   )
   {
+    std::string why;
     const auto inFolder = [this](const std::string& file) {
       if (file.empty() || file.front() == '/') {
         return file;
@@ -159,128 +151,189 @@ namespace faf::editor
       : nullptr;
     const std::string tag = "mat" + std::to_string(materialIndex);
     const auto write = [&](const std::string& name, const TexImage& image, const DdsKind kind) -> std::string {
-      std::vector<std::uint8_t> dds;
-      if (!EncodeDds(image, kind, dds, why)) {
+      const auto dds = EncodeDds(image, kind);
+      if (!dds) {
+        why = dds.error();
         return {};
       }
       std::ofstream(folder / name, std::ios::binary | std::ios::trunc)
-        .write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
+        .write(reinterpret_cast<const char*>(dds->data()), static_cast<std::streamsize>(dds->size()));
       return vfs + "/" + name;
-    };
-    const auto solid = [&](const std::string& name, const float r, const float g, const float b, const float a) {
-      TexImage image;
-      image.Reset(4, 4);
-      for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
-          float* const d = image.Pixel(x, y);
-          d[0] = r;
-          d[1] = g;
-          d[2] = b;
-          d[3] = a;
-        }
-      }
-      return write(name, image, DdsKind::Bgra);
     };
     const auto exists = [&](const std::string& path) {
       std::string bytes;
       return !path.empty() && ReadGameFile(path, bytes);
     };
-    // The layers and layer A's normal map as they are (Studio's slots: diffuse a, b, light masks 0..2, normal a, b,
-    // specular a, b); the map's lowest layer for a material with no ground texture.
-    out = MeshMaterialView{};
+    // FAF Studio's slots: diffuse a, b, light masks 0..2, normal a, b, mask a, b. The game's mesh technique has five
+    // samplers, so the editor's techniques read them packed (CD3DEffectTechnique.cpp, EditorMeshTerrainPS):
+    //   albedo / secondary: the layers as they are;
+    //   normals: layer A's normal x, y and layer B's (z made again in the shader);
+    //   lookup: layer A's mask green (glow) and blue (sun highlight, times Studio's 0.5), then layer B's;
+    //   specular: 2 x 2 tiles over the second coordinates, light masks 0, 1 (its alpha the layers' blend), 2, and a
+    //   tile of constants in four bands: the void colour and whether the ground fades into it; SC2's shadow fill colour
+    //   and how far a moving shadow pulls towards it; the fade's level and span; the alpha test's reference.
+    // The map's lowest layer for a material with no ground texture.
+    MeshMaterialView out;
+    std::string normalsA;
+    std::string normalsB;
     if (material != nullptr && exists(inFolder(material->files[0]))) {
       out.albedo = inFolder(material->files[0]);
-      out.normals = exists(inFolder(material->files[5])) ? inFolder(material->files[5]) : std::string();
+      normalsA = inFolder(material->files[5]);
+      normalsB = inFolder(material->files[6]);
     } else {
       for (const EdTools::LayerSlot& layer : LayerSlots()) {
         if (!layer.albedo.empty()) {
           out.albedo = layer.albedo;
-          out.normals = layer.normals;
+          normalsA = layer.normals;
           break;
         }
       }
     }
     if (out.albedo.empty()) {
-      why = "no ground texture";
-      return false;
+      return std::unexpected("no ground texture");
     }
     out.secondary =
       material != nullptr && exists(inFolder(material->files[1])) ? inFolder(material->files[1]) : out.albedo;
-    if (out.normals.empty()) {
-      out.normals = solid(tag + "_flatnormal.dds", 0.5f, 0.5f, 1.0f, 1.0f);
-    }
     out.alphaTest = material != nullptr && material->alphaTest >= 0.0f;
-    // The light masks for the surface's own normal and the layers' blend, over the second coordinates.
-    MeshTexture masks[3];
-    bool haveMask[3] = {};
-    int size = 0;
-    for (int k = 0; k < 3 && material != nullptr; ++k) {
-      haveMask[k] = LoadMeshTexture(inFolder(material->files[2 + k]), masks[k]);
-      size = std::max(size, haveMask[k] ? std::max(masks[k].w, masks[k].h) : 0);
-    }
-    out.lightMasks = haveMask[0] || haveMask[1] || haveMask[2];
-    if (out.lightMasks) {
-      size = std::clamp(size, 64, 1024);
-      TexImage light;
-      light.Reset(size, 4);
-      for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-          const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size);
-          const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
-          float sum[3] = {0, 0, 0};
-          float blend = 0.0f;
-          for (int k = 0; k < 3; ++k) {
-            float c[4] = {1, 1, 1, 1};
-            if (haveMask[k]) {
-              masks[k].Sample(u, v, c);
-            }
-            for (int q = 0; q < 3; ++q) {
-              sum[q] += 0.57735027f * LinearOf(c[q]);
-            }
-            if (k == 1) {
-              blend = c[3];
-            }
-          }
-          float* const d = light.Pixel(x, y);
-          for (int q = 0; q < 3; ++q) {
-            d[q] = std::pow(std::clamp(sum[q] * 0.5f, 0.0f, 1.0f), 1.0f / 2.2f);
-          }
-          d[3] = material->blending ? blend : 0.0f;
-        }
-      }
-      out.specular = write(tag + "_light.dds", light, DdsKind::Bc3);
-    } else {
-      out.specular = solid(tag + "_light.dds", 1.0f, 1.0f, 1.0f, 0.0f);
-    }
-    // The mask, with only what the material uses (glow: green, sun highlight: blue).
-    MeshTexture mask;
-    if (
-      material != nullptr && (material->glow || material->highlight) &&
-      LoadMeshTexture(inFolder(material->files[7]), mask)
-    ) {
-      const int side = std::clamp(std::max(mask.w, mask.h), 4, 1024);
+    const auto square =
+      [](const MeshTexture& a, const MeshTexture& b, const bool haveA, const bool haveB, const int lo, const int hi) {
+      int side = 0;
+      side = std::max(side, haveA ? std::max(a.w, a.h) : 0);
+      side = std::max(side, haveB ? std::max(b.w, b.h) : 0);
+      return std::clamp(side, lo, hi);
+    };
+    // The normal maps, A's and B's (one layer only: B is A).
+    {
+      MeshTexture a;
+      MeshTexture b;
+      const bool haveA = LoadMeshTexture(normalsA, a);
+      const bool haveB = LoadMeshTexture(normalsB, b);
+      const int side = haveA || haveB ? square(a, b, haveA, haveB, 4, 1024) : 4;
       TexImage image;
       image.Reset(side, 4);
       for (int y = 0; y < side; ++y) {
         for (int x = 0; x < side; ++x) {
-          float c[4];
-          mask.Sample(
-            (static_cast<float>(x) + 0.5f) / static_cast<float>(side),
-            (static_cast<float>(y) + 0.5f) / static_cast<float>(side),
-            c
-          );
+          const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(side);
+          const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(side);
+          float ca[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+          float cb[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+          if (haveA) {
+            a.Sample(u, v, ca);
+          }
+          if (haveB) {
+            b.Sample(u, v, cb);
+          } else if (haveA) {
+            std::copy(std::begin(ca), std::end(ca), std::begin(cb));
+          }
           float* const d = image.Pixel(x, y);
-          d[0] = 0.0f;
-          d[1] = material->glow ? c[1] : 0.0f;
-          d[2] = material->highlight ? c[2] : 0.0f;
-          d[3] = 1.0f;
+          d[0] = ca[0];
+          d[1] = ca[1];
+          d[2] = cb[0];
+          d[3] = cb[1];
         }
       }
-      out.lookup = write(tag + "_mask.dds", image, DdsKind::Bc3);
-    } else {
-      out.lookup = solid(tag + "_mask.dds", 0.0f, 0.0f, 0.0f, 1.0f);
+      out.normals = write(tag + "_normals.dds", image, DdsKind::Bgra);
     }
-    return !out.specular.empty() && !out.lookup.empty() && !out.normals.empty();
+    // The masks, with only what the material uses (Studio: no mask A, no glow, and a full highlight).
+    {
+      MeshTexture a;
+      MeshTexture b;
+      const bool haveA = material != nullptr && LoadMeshTexture(inFolder(material->files[7]), a);
+      const bool haveB = material != nullptr && LoadMeshTexture(inFolder(material->files[8]), b);
+      const bool glow = material != nullptr && material->glow && haveA;
+      const float highlight = material != nullptr && material->highlight ? 0.5f : 0.0f;
+      const int side = haveA || haveB ? square(a, b, haveA, haveB, 4, 1024) : 4;
+      TexImage image;
+      image.Reset(side, 4);
+      for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+          const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(side);
+          const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(side);
+          float ca[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+          float cb[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+          if (haveA) {
+            a.Sample(u, v, ca);
+          }
+          if (haveB) {
+            b.Sample(u, v, cb);
+          } else {
+            std::copy(std::begin(ca), std::end(ca), std::begin(cb));
+          }
+          float* const d = image.Pixel(x, y);
+          d[0] = glow ? ca[1] : 0.0f;
+          d[1] = ca[2] * highlight;
+          d[2] = glow ? cb[1] : 0.0f;
+          d[3] = cb[2] * highlight;
+        }
+      }
+      out.lookup = write(tag + "_mask.dds", image, DdsKind::Bgra);
+    }
+    // The light masks and the constants.
+    {
+      MeshTexture masks[3];
+      bool haveMask[3] = {};
+      int tile = 4;
+      for (int k = 0; k < 3 && material != nullptr; ++k) {
+        haveMask[k] = LoadMeshTexture(inFolder(material->files[2 + k]), masks[k]);
+        tile = std::max(tile, haveMask[k] ? std::max(masks[k].w, masks[k].h) : 0);
+      }
+      out.lightMasks = haveMask[0] || haveMask[1] || haveMask[2];
+      tile = std::clamp(tile, 4, 512);
+      const edmesh::Settings& settings = mMeshMap.settings;
+      const bool water = settings.water > -9000.0f;
+      const bool haze = !water && settings.haveVoid && settings.haze > -9000.0f;
+      // 16 bits over two channels: the level over -1024 .. 3072, the span over 0 .. 4096.
+      const auto split = [](const float value, const float lo, const float span, float& high, float& low) {
+        const int word = std::clamp(static_cast<int>(std::lround((value - lo) / span * 65535.0f)), 0, 65535);
+        high = static_cast<float>(word >> 8) / 255.0f;
+        low = static_cast<float>(word & 0xFF) / 255.0f;
+      };
+      float band[4][4] = {
+        {settings.voidColor[0], settings.voidColor[1], settings.voidColor[2], haze ? 1.0f : 0.0f},
+        {settings.shadowColor[0],
+         settings.shadowColor[1],
+         settings.shadowColor[2],
+         std::clamp(settings.shadowColor[3], 0.0f, 1.0f)},
+        {0, 0, 0, 0},
+        {material != nullptr && material->alphaTest >= 0.0f ? std::clamp(material->alphaTest, 0.0f, 255.0f) / 255.0f
+                                                            : 0.5f,
+         0,
+         0,
+         0},
+      };
+      split(settings.haze, -1024.0f, 4096.0f, band[2][0], band[2][1]);
+      split(std::max(settings.hazeSpan, 0.001f), 0.0f, 4096.0f, band[2][2], band[2][3]);
+      TexImage atlas;
+      atlas.Reset(tile * 2, 4);
+      for (int y = 0; y < tile * 2; ++y) {
+        for (int x = 0; x < tile * 2; ++x) {
+          float* const d = atlas.Pixel(x, y);
+          const int k = (y >= tile ? 2 : 0) + (x >= tile ? 1 : 0);
+          if (k == 3) {
+            const int b = std::clamp((y - tile) * 4 / tile, 0, 3);
+            std::copy(std::begin(band[b]), std::end(band[b]), d);
+            continue;
+          }
+          float c[4] = {0.5f, 0.5f, 0.5f, 0.5f}; // Studio's grey for a mask the material lacks
+          if (haveMask[k]) {
+            masks[k].Sample(
+              (static_cast<float>(x % tile) + 0.5f) / static_cast<float>(tile),
+              (static_cast<float>(y % tile) + 0.5f) / static_cast<float>(tile),
+              c
+            );
+          }
+          if (k == 1 && (material == nullptr || !material->blending || !haveMask[1])) {
+            c[3] = 0.0f; // the layers don't blend
+          }
+          std::copy(std::begin(c), std::end(c), d);
+        }
+      }
+      out.specular = write(tag + "_light.dds", atlas, DdsKind::Bgra);
+    }
+    if (out.specular.empty() || out.lookup.empty() || out.normals.empty()) {
+      return std::unexpected(why);
+    }
+    return out;
   }
 
   void EdMapScene::DeleteMeshInstances()
@@ -307,9 +360,10 @@ namespace faf::editor
   void EdMapScene::BuildMeshInstances()
   {
     mMeshInstancesTried = true;
+    mMeshBuiltForBoth = mMeshMode == 2;
     moho::RRuleGameRules* const rules = Rules();
     moho::MeshRenderer* const renderer = moho::MeshRenderer::GetInstance();
-    if (rules == nullptr || renderer == nullptr || !mMeshMap.Loaded()) {
+    if (rules == nullptr || renderer == nullptr || !MeshInView()) {
       mMeshInstancesTried = false; // again once they are up
       return;
     }
@@ -329,7 +383,7 @@ namespace faf::editor
       const std::string prefix = mDocument.FolderName() + "_";
       for (const auto& entry : std::filesystem::directory_iterator(mMeshViewCache, ec)) {
         const std::string name = entry.path().filename().string();
-        if (name.rfind(prefix, 0) == 0 && name != prefix + std::to_string(generation)) {
+        if (name.starts_with(prefix) && name != prefix + std::to_string(generation)) {
           std::error_code removeError;
           std::filesystem::remove_all(entry.path(), removeError);
         }
@@ -345,14 +399,58 @@ namespace faf::editor
     std::string bakeWhy;
     int masked = 0;
     for (const edmesh::Patch& patch : mMeshMap.patches) {
-      if (views.count(patch.material) == 0) {
-        MeshMaterialView view;
-        if (!mMeshViewCache.empty() && BakeMeshMaterial(patch.material, folder, vfs, view, bakeWhy)) {
-          masked += view.lightMasks ? 1 : 0;
-          views[patch.material] = view;
+      if (!views.contains(patch.material)) {
+        const auto view = mMeshViewCache.empty()
+          ? std::expected<MeshMaterialView, std::string>(std::unexpected(bakeWhy))
+          : BakeMeshMaterial(patch.material, folder, vfs);
+        if (view) {
+          masked += view->lightMasks ? 1 : 0;
+          views[patch.material] = *view;
         } else {
+          bakeWhy = view.error();
           views[patch.material] = MeshMaterialView{};
         }
+      }
+    }
+    // Each ground patch again about its own middle, the instance placed there: the renderer culls a model by a sphere
+    // round the instance's place (half the model's size: MeshInstance::UpdateInterpolatedFields), so a patch kept in
+    // world coordinates at the origin was culled by any view that doesn't hold the origin, the shadow map's above all.
+    std::map<std::size_t, std::pair<std::string, Wm3::Vec3f>> centred;
+    if (!mMeshViewCache.empty()) {
+      for (std::size_t i = 0; i < mMeshMap.patches.size(); ++i) {
+        const edmesh::Patch& patch = mMeshMap.patches[i];
+        std::string bytes;
+        if (patch.sky || !ReadGameFile(inFolder(patch.file), bytes) || bytes.size() < 0x1C) {
+          continue;
+        }
+        const auto word = [&](const std::size_t at) {
+          std::uint32_t v = 0;
+          std::memcpy(&v, bytes.data() + at, 4);
+          return v;
+        };
+        const std::size_t vertices = word(0x10);
+        const std::size_t count = word(0x18);
+        if (!bytes.starts_with("MODL") || vertices + count * 68 > bytes.size()) {
+          continue;
+        }
+        const float middle[3] = {
+          (patch.boundsMin[0] + patch.boundsMax[0]) * 0.5f,
+          (patch.boundsMin[1] + patch.boundsMax[1]) * 0.5f,
+          (patch.boundsMin[2] + patch.boundsMax[2]) * 0.5f,
+        };
+        for (std::size_t v = 0; v < count; ++v) {
+          for (int k = 0; k < 3; ++k) {
+            float f = 0.0f;
+            char* const at = bytes.data() + vertices + v * 68 + static_cast<std::size_t>(k) * 4;
+            std::memcpy(&f, at, 4);
+            f -= middle[k];
+            std::memcpy(at, &f, 4);
+          }
+        }
+        const std::string file = "patch" + std::to_string(i) + ".scm";
+        std::ofstream(folder / file, std::ios::binary | std::ios::trunc)
+          .write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        centred[i] = {vfs + "/" + file, Wm3::Vec3f{middle[0], middle[1], middle[2]}};
       }
     }
     // The fill to the horizon past the mesh: at the water (its deep colour) or below the mesh (the void's colour).
@@ -399,14 +497,22 @@ namespace faf::editor
         {ObjMesh::Corner{0, 0, 0}, ObjMesh::Corner{3, 3, 0}, ObjMesh::Corner{2, 2, 0}},
       };
       std::string scmWhy;
-      const std::vector<std::uint8_t> scm = ScmFromObj(quad, "fill", 1.0f, "the mesh view's fill", scmWhy);
-      if (!scm.empty() && EncodeDds(image, DdsKind::Bgra, dds, scmWhy)) {
-        std::ofstream(folder / "fill.scm", std::ios::binary | std::ios::trunc)
-          .write(reinterpret_cast<const char*>(scm.data()), static_cast<std::streamsize>(scm.size()));
-        std::ofstream(folder / "fill.dds", std::ios::binary | std::ios::trunc)
-          .write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
-        fillMesh = vfs + "/fill.scm";
-        fillTexture = vfs + "/fill.dds";
+      const auto scm = ScmFromObj(quad, "fill", 1.0f, "the mesh view's fill");
+      if (!scm) {
+        scmWhy = scm.error();
+      }
+      if (scm) {
+        if (auto encoded = EncodeDds(image, DdsKind::Bgra); !encoded) {
+          scmWhy = encoded.error();
+        } else {
+          dds = std::move(*encoded);
+          std::ofstream(folder / "fill.scm", std::ios::binary | std::ios::trunc)
+            .write(reinterpret_cast<const char*>(scm->data()), static_cast<std::streamsize>(scm->size()));
+          std::ofstream(folder / "fill.dds", std::ios::binary | std::ios::trunc)
+            .write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
+          fillMesh = vfs + "/fill.scm";
+          fillTexture = vfs + "/fill.dds";
+        }
       }
     }
     if (!mMeshViewCache.empty() && !moho::DISK_MountDirectoryNow(folder, vfs.c_str())) {
@@ -429,7 +535,8 @@ namespace faf::editor
                        const std::string& mesh,
                        const MeshMaterialView& view,
                        const std::string& shader,
-                       const int kind
+                       const int kind,
+                       const Wm3::Vec3f& place
                      ) {
       moho::RResId rid{};
       rid.name.assign(id.c_str());
@@ -453,7 +560,7 @@ namespace faf::editor
       }
       moho::VTransform at{};
       at.orient_ = Wm3::Quatf(1.0f, 0.0f, 0.0f, 0.0f);
-      at.pos_ = Wm3::Vec3f{0.0f, 0.0f, 0.0f};
+      at.pos_ = place;
       instance->SetStance(at, at);
       instance->isHidden = mMeshMode == 0 ? 1 : 0;
       mMeshPatchInstances.push_back(instance);
@@ -463,8 +570,8 @@ namespace faf::editor
     for (std::size_t i = 0; i < mMeshMap.patches.size(); ++i) {
       const edmesh::Patch& patch = mMeshMap.patches[i];
       const MeshMaterialView& view = views[patch.material];
-      if (view.albedo.empty()) {
-        continue; // (no cache, no texture: not drawn)
+      if (view.albedo.empty() || patch.vertexCount == 0) {
+        continue; // (no cache, no texture, or its file couldn't be read: not drawn)
       }
       const edmesh::Material* material =
         patch.material >= 0 && static_cast<std::size_t>(patch.material) < mMeshMap.materials.size()
@@ -474,16 +581,19 @@ namespace faf::editor
       if (patch.sky) {
         shader = material != nullptr && material->additive ? "EditorMeshSkyAdd" : "EditorMeshSky";
       } else {
-        shader =
-          std::string(view.lightMasks ? "EditorMeshTerrain" : "EditorMeshTerrainSun") + (view.alphaTest ? "Alpha" : "");
+        // Both: the variants pulled towards the camera, so the height field shows only where it lies above the mesh.
+        shader = std::string(view.lightMasks ? "EditorMeshTerrain" : "EditorMeshTerrainSun") +
+          (view.alphaTest ? "Alpha" : "") + (mMeshMode == 2 ? "Both" : "");
       }
+      const auto own = centred.find(i);
       if (
         add(
           "/editor/meshterrain/patch" + std::to_string(i) + "_mesh",
-          inFolder(patch.file),
+          own != centred.end() ? own->second.first : inFolder(patch.file),
           view,
           shader,
-          patch.sky ? 1 : 0
+          patch.sky ? 1 : 0,
+          own != centred.end() ? own->second.second : Wm3::Vec3f{0.0f, 0.0f, 0.0f}
         )
       ) {
         ++made;
@@ -494,7 +604,7 @@ namespace faf::editor
       MeshMaterialView fill;
       fill.albedo = fill.secondary = fillTexture;
       fill.normals = fill.specular = fill.lookup = fillTexture;
-      (void)add("/editor/meshterrain/fill_mesh", fillMesh, fill, "EditorMeshFill", 2);
+      (void)add("/editor/meshterrain/fill_mesh", fillMesh, fill, "EditorMeshFill", 2, Wm3::Vec3f{0.0f, 0.0f, 0.0f});
     }
     gpg::Logf(
       "editor: mesh terrain: %d of %zu patches drawn by the mesh technique (%d sky)%s",
@@ -509,7 +619,10 @@ namespace faf::editor
   {
     // Each frame: the patches' models made once the rules are up, shown or hidden by the mode; the height field off
     // in Mesh only (back on whenever the mesh isn't shown alone).
-    if (mMeshMap.Loaded() && !mMeshInstancesTried) {
+    if (MeshInView() && mMeshInstancesTried && !mMeshPatchInstances.empty() && (mMeshMode == 2) != mMeshBuiltForBoth) {
+      DeleteMeshInstances(); // into or out of Both: the patches again with or without the pull towards the camera
+    }
+    if (MeshInView() && !mMeshInstancesTried) {
       BuildMeshInstances();
     }
     // Their bounds published again each frame: SetStance publishes them only when the place changes (a patch at the
@@ -553,7 +666,7 @@ namespace faf::editor
       moho::ren_ShadowExtraMaxY = 0.0f;
       mMeshSetsShadowRange = false;
     }
-    const bool hide = mMeshMode == 1 && mMeshMap.Loaded() && !mMeshPatchInstances.empty();
+    const bool hide = mMeshMode == 1 && MeshInView() && !mMeshPatchInstances.empty();
     if (hide != mMeshHidesTerrain) {
       mMeshHidesTerrain = hide;
       moho::ren_TerrainSurface = !hide;
@@ -566,10 +679,28 @@ namespace faf::editor
     mMeshMap.Clear();
     mMeshTris.clear();
     mMeshEdges.clear();
+    mMeshViewOff = false;
     std::string system;
     std::string manifest;
     const std::string& scenario = mDocument.Scenario();
     if (!ReadScenarioField(scenario, "TerrainSystem", system) || system != "mesh") {
+      // FAF Studio keeps the manifest whatever the scenario says (meshmap.lua Load reads the folder's): the panel and
+      // the next import get it, the view keeps the height field.
+      const std::string own = "/maps/" + mDocument.FolderName() + "/terrain/terrain.lua";
+      if (!edmesh::ReadVfs(own).empty()) {
+        (void)mMeshMap.Load(own);
+        mMeshMap.manifestPath = own;
+        mMeshViewOff = true;
+        gpg::Logf(
+          "editor: mesh terrain: %s read into the panel (%zu patches, %zu materials); the scenario doesn't name it",
+          own.c_str(),
+          mMeshMap.patches.size(),
+          mMeshMap.materials.size()
+        );
+        return "This map isn't a mesh terrain map (its scenario has no TerrainSystem = 'mesh'); its "
+               "terrain/terrain.lua "
+               "is in the panel (Mesh map in scenario makes it the ground).";
+      }
       return "This map isn't a mesh terrain map (its scenario has no TerrainSystem = 'mesh').";
     }
     if (!ReadScenarioField(scenario, "TerrainMesh", manifest) || manifest.empty()) {
@@ -579,6 +710,30 @@ namespace faf::editor
       gpg::Warnf("editor: mesh terrain: %s", mMeshMap.error.c_str());
       return "The mesh terrain didn't load: " + mMeshMap.error;
     }
+    const std::size_t drawn = BuildMeshLines();
+    char text[200];
+    (void)std::snprintf(
+      text,
+      sizeof(text),
+      "Mesh terrain %s: %zu patches, %u triangles%s",
+      manifest.c_str(),
+      mMeshMap.patches.size(),
+      mMeshMap.TotalTriangles(),
+      drawn < mMeshMap.TotalTriangles() ? " (the view draws the first 1.5 million)" : ""
+    );
+    gpg::Logf("editor: %s", text);
+    if (!mMeshMap.error.empty()) {
+      // Patches whose files are missing or broken: their entries stay (Save writes them back), they aren't drawn.
+      gpg::Warnf("editor: mesh terrain: patches not read: %s", mMeshMap.error.c_str());
+      return std::string(text) + "; not read (kept in the manifest, Check names them): " + mMeshMap.error;
+    }
+    return text;
+  }
+
+  std::size_t EdMapScene::BuildMeshLines()
+  {
+    mMeshTris.clear();
+    mMeshEdges.clear();
     // The triangles shaded by their normals against a light from above, once; the edges for the Both mode.
     std::size_t drawn = 0;
     for (const edmesh::Patch& p : mMeshMap.patches) {
@@ -623,27 +778,156 @@ namespace faf::editor
         ++drawn;
       }
     }
+    return drawn;
+  }
+
+  std::string EdMapScene::SetMeshInScenario(
+    const bool on
+  )
+  {
+    // FAF Studio's "Mesh map in scenario": the view takes up (or leaves) the manifest the panel holds, as it is (its
+    // edits not saved yet stay), without reading it again.
+    DeleteMeshInstances();
+    if (!on || mMeshMap.manifestPath.empty()) {
+      mMeshViewOff = true;
+      mMeshTris.clear();
+      mMeshEdges.clear();
+      return on ? "No manifest in the panel: Load, New manifest from the map or an import first."
+                : "The map's ground is its height field again (the manifest stays in the panel and its folder).";
+    }
+    mMeshViewOff = false;
+    const std::size_t drawn = BuildMeshLines();
     char text[200];
     (void)std::snprintf(
       text,
       sizeof(text),
-      "Mesh terrain %s: %zu patches, %u triangles%s",
-      manifest.c_str(),
+      "The scenario names %s: %zu patches, %zu triangles drawn (the panel's manifest as it is; Save writes it)",
+      mMeshMap.manifestPath.c_str(),
       mMeshMap.patches.size(),
-      mMeshMap.TotalTriangles(),
-      drawn < mMeshMap.TotalTriangles() ? " (the view draws the first 1.5 million)" : ""
+      drawn
     );
-    gpg::Logf("editor: %s", text);
+    gpg::Logf("editor: mesh terrain: %s", text);
     return text;
   }
 
   std::vector<std::string> EdMapScene::CheckMeshTerrain()
   {
     std::vector<std::string> lines;
-    for (const MeshScanFinding& f : ScanMeshMap(mMeshMap).findings) {
+    if (mMeshMap.manifestPath.empty()) {
+      lines.push_back(
+        "I: no mesh terrain manifest is loaded (Mesh map in scenario, Load or New manifest from the map first)"
+      );
+      return lines;
+    }
+    // Studio's manifest checks against the open map and the files, then the patches' own.
+    MeshManifestFacts facts;
+    if (const std::shared_ptr<TerrainSource> terrain = TerrainHeights(); terrain != nullptr && terrain->width > 1) {
+      facts.mapSize = terrain->width - 1;
+      facts.groundHighest = *std::max_element(terrain->heights.begin(), terrain->heights.end());
+    }
+    if (const std::optional<EdDocument::PlayableRect> area = mDocument.PlayableArea()) {
+      facts.havePlayable = true;
+      facts.playable[0] = static_cast<float>(area->x0);
+      facts.playable[1] = static_cast<float>(area->z0);
+      facts.playable[2] = static_cast<float>(area->x1);
+      facts.playable[3] = static_cast<float>(area->z1);
+    }
+    const WaterState water = mDocument.WaterNow();
+    facts.water = water.enabled;
+    facts.waterLevel = water.elevation;
+    const std::string& scenario = mDocument.Scenario();
+    facts.haveScenario = !scenario.empty();
+    (void)ReadScenarioField(scenario, "TerrainSystem", facts.terrainSystem);
+    (void)ReadScenarioField(scenario, "TerrainMesh", facts.terrainMesh);
+    facts.expectedMesh = "/maps/" + mDocument.FolderName() + "/terrain/terrain.lua";
+    facts.read = [](const std::string& path) {
+      return edmesh::ReadVfs(path);
+    };
+    for (const MeshScanFinding& f : CheckMeshManifest(mMeshMap, facts)) {
       lines.push_back(std::string(1, f.severity) + " " + f.code + ": " + f.text);
     }
+    if (mMeshMap.Loaded()) {
+      for (const MeshScanFinding& f : ScanMeshMap(mMeshMap).findings) {
+        lines.push_back(std::string(1, f.severity) + " " + f.code + ": " + f.text);
+      }
+    }
     return lines;
+  }
+
+  std::string EdMapScene::SyncMeshFromMap(
+    const bool fresh
+  )
+  {
+    const std::shared_ptr<TerrainSource> terrain = TerrainHeights();
+    if (terrain == nullptr || terrain->width < 2) {
+      return "No map open.";
+    }
+    if (fresh) {
+      DeleteMeshInstances();
+      mMeshMap.Clear();
+      mMeshTris.clear();
+      mMeshEdges.clear();
+      mMeshMap.manifestPath = "/maps/" + mDocument.FolderName() + "/terrain/terrain.lua";
+      mMeshMap.dir = "/maps/" + mDocument.FolderName() + "/terrain";
+    } else if (mMeshMap.manifestPath.empty()) {
+      return "Load a mesh terrain manifest, or make a new one from the map, first.";
+    }
+    edmesh::Settings& s = mMeshMap.settings;
+    const auto give = [&s](const char* key, const float value) {
+      if (float* slot = edmesh::SettingNumber(s, key)) {
+        *slot = value;
+        s.given.insert(key);
+      }
+    };
+    const float size = static_cast<float>(terrain->width - 1);
+    give("size", size);
+    if (const std::optional<EdDocument::PlayableRect> area = mDocument.PlayableArea()) {
+      give("playable_x0", static_cast<float>(area->x0));
+      give("playable_z0", static_cast<float>(area->z0));
+      give("playable_x1", static_cast<float>(area->x1));
+      give("playable_z1", static_cast<float>(area->z1));
+    } else {
+      give("playable_x0", 0.0f);
+      give("playable_z0", 0.0f);
+      give("playable_x1", size);
+      give("playable_z1", size);
+    }
+    const WaterState water = mDocument.WaterNow();
+    if (water.enabled) {
+      give("water", water.elevation);
+      give("water_abyss", std::min(water.abyss, water.elevation - 1.0f));
+    } else {
+      for (const char* key : {"water", "water_abyss", "water_tint"}) {
+        edmesh::SetSettingGiven(s, key, false);
+      }
+    }
+    const auto [low, high] = std::minmax_element(terrain->heights.begin(), terrain->heights.end());
+    give("ground_low", *low);
+    give("ground_high", *high);
+    const LightingState lighting = mDocument.LightingNow();
+    const float length = std::sqrt(
+      lighting.sunDirection[0] * lighting.sunDirection[0] + lighting.sunDirection[1] * lighting.sunDirection[1] +
+      lighting.sunDirection[2] * lighting.sunDirection[2]
+    );
+    if (length > 0.0001f) {
+      give("sun_x", lighting.sunDirection[0] / length);
+      give("sun_y", lighting.sunDirection[1] / length);
+      give("sun_z", lighting.sunDirection[2] / length);
+    }
+    gpg::Logf(
+      "editor: mesh terrain: %s: size %.0f, playable %.0f,%.0f - %.0f,%.0f, water %s, ground %.2f .. %.2f",
+      fresh ? "new manifest from the map" : "synced from the map",
+      static_cast<double>(s.size),
+      static_cast<double>(s.playable[0]),
+      static_cast<double>(s.playable[1]),
+      static_cast<double>(s.playable[2]),
+      static_cast<double>(s.playable[3]),
+      water.enabled ? std::to_string(water.elevation).c_str() : "none",
+      static_cast<double>(*low),
+      static_cast<double>(*high)
+    );
+    return fresh ? "A new manifest from the map (no patches yet: import an OBJ, then Save)."
+                 : "Size, playable area, water, heights and sun taken from the map (Save writes them).";
   }
 
   float EdMapScene::PlacementHeight(
@@ -656,7 +940,7 @@ namespace faf::editor
           static_cast<std::int32_t>(std::lround(x)), static_cast<std::int32_t>(std::lround(z))
         )
       : 0.0f;
-    if (mMeshMode != 0 && mMeshMap.Loaded()) {
+    if (mMeshMode != 0 && MeshInView()) {
       float y = 0.0f;
       if (mMeshMap.HeightAt(x, z, field + kReach, y)) {
         return y;

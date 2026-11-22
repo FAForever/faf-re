@@ -1,6 +1,6 @@
 # Nightly releases
 
-The [Nightly release workflow](../../.github/workflows/nightly-release.yml) publishes master's head as the latest release when that night's [Replay parity](../parity-data/README.md) run has new desyncs in at most 5 % of the replays it played. Replay parity starts at 20:00 UTC (00:00 UTC+4), and takes about 5 h 30 min.
+The [Nightly release workflow](../../.github/workflows/nightly-release.yml) publishes master's head as the latest release when that night's [Replay parity](../parity-data/README.md) run has new desyncs in at most 5 % of the replays it played. Replay parity takes about 5 h 30 min. Its nightly schedule is off, so no nightly is published by itself now: a release is built by starting this workflow by hand (`publish` ticked, `parity_run` naming a parity run).
 
 | Job | What it does |
 |---|---|
@@ -31,6 +31,10 @@ A desync never fails a parity run: the report lists it. So a failed job in the n
 GitHub starts no workflow from what the workflow token does, so a parity run that Nightly retry re-ran doesn't start Nightly release when it ends. Its `release` job starts it instead, with `publish` and `parity_run`, and only when the report passes the same gate. A re-run started by a person starts Nightly release as a first attempt does.
 
 Started by hand, the workflow builds the commit and writes the notes as artifacts. It publishes only with `publish` ticked, and such a build has passed no parity run, as its notes say. Give `parity_run` to report a run in the notes, with any new failures named, and `note` for a line of your own, such as what was fixed after that run.
+
+## Releases
+
+A release is started by hand like a nightly, with `release` ticked as well: its tag is the month's next number without `-nightly` (`2026.11.014`), its title `2026.11.014 x64\Linux`. Before starting it, commit its changelog to master as `tools/release/changelog/<tag>.md`: what changed since the previous nightly or release, written for players and testers, grouped by what they notice. The notes put it on top, then the parity run, then every commit as a nightly lists them; the `plan` job stops when the file is missing. The number is counted when the run starts, so name the file after the number the next nightly would take.
 
 Nightly tags and releases stay until someone deletes them; nothing removes old ones.
 

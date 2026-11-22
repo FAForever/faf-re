@@ -426,7 +426,9 @@ namespace
       out.type = down ? EventType::MouseDown : EventType::MouseUp;
       out.window = window;
       out.button = button;
-      out.clicks = source.button.clicks;
+      // Issue #478: as Windows counts them, a press after a double click starts over, so only every
+      // second press of a run is a double click (SDL counts on: 3 for a triple click).
+      out.clicks = source.button.clicks >= 2 && source.button.clicks % 2 == 0 ? 2 : (source.button.clicks > 0 ? 1 : 0);
       ToPixels(window, source.button.x, source.button.y, out.x, out.y);
       out.buttonsDown = ButtonsDownOf(SDL_GetMouseState(nullptr, nullptr));
       out.modifiers = ModifiersOf(SDL_GetModState());
@@ -450,6 +452,9 @@ namespace
       const int virtualKey = VirtualKeyOf(source.key.key);
       SetModifierKeyState(source.key.key, down);
       if (virtualKey == 0) {
+        return false;
+      }
+      if (down && system::IsSystemShortcut(virtualKey, source.key.mod)) {
         return false;
       }
       system::OnKey(virtualKey, down);
@@ -557,6 +562,15 @@ namespace platform::window::sdl
   )
   {
     return gCursorRequestHandler != nullptr && gCursorRequestHandler(window);
+  }
+
+  int PixelsToWindowUnits(
+    SDL_Window* const window,
+    const int pixels
+  )
+  {
+    const float density = window != nullptr ? SDL_GetWindowPixelDensity(window) : 1.0f;
+    return density > 0.0f ? static_cast<int>(std::lround(static_cast<float>(pixels) / density)) : pixels;
   }
 
   bool KeyOfVirtualKey(
@@ -881,7 +895,9 @@ namespace platform::window
       int currentHeight = 0;
       (void)SDL_GetWindowSize(AsWindow(window), &currentWidth, &currentHeight);
       (void)SDL_SetWindowSize(
-        AsWindow(window), width != -1 ? width : currentWidth, height != -1 ? height : currentHeight
+        AsWindow(window),
+        width != -1 ? sdl::PixelsToWindowUnits(AsWindow(window), width) : currentWidth,
+        height != -1 ? sdl::PixelsToWindowUnits(AsWindow(window), height) : currentHeight
       );
     }
     (void)SDL_SyncWindow(AsWindow(window));
@@ -1228,6 +1244,18 @@ namespace platform::window
     }
     SDL_free(displays);
     return found;
+  }
+
+  float DisplayScale(
+    Handle const window
+  )
+  {
+    if (!gInitialized) {
+      return 1.0f;
+    }
+    const float scale = window != nullptr ? SDL_GetWindowDisplayScale(static_cast<SDL_Window*>(window))
+                                          : SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
+    return scale > 0.0f ? scale : 1.0f;
   }
 
   bool ShowSplash(

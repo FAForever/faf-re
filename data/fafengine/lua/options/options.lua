@@ -508,6 +508,54 @@ do
     end
 end
 
+-- Detailed water (ren_WaterDetail), on Direct3D 12 and Vulkan at high fidelity: on by default.
+do
+    local function Supported(command)
+        -- The engine's Lua reports C functions as 'cfunction'.
+        local kind = type(ConTextMatches)
+        if kind ~= 'function' and kind ~= 'cfunction' then
+            return false
+        end
+        local ok, matches = pcall(ConTextMatches, command)
+        if not ok or type(matches) ~= 'table' then
+            return false
+        end
+        for _, name in ipairs(matches) do
+            if name == command then
+                return true
+            end
+        end
+        return false
+    end
+
+    local video = options and options.video
+    if video and video.items and Supported('ren_WaterDetail') then
+        local position = table.getn(video.items) + 1
+        for index, item in ipairs(video.items) do
+            if item.key == 'atmosphere' then
+                position = index + 1
+            end
+        end
+        table.insert(video.items, position, {
+            title = 'Detailed water',
+            key = 'water_detail',
+            type = 'toggle',
+            default = 1,
+            tip = 'Direct3D 12 and Vulkan, high fidelity: rolling waves, a sun path and sparkles on the water, clear '
+                .. 'shallows and foam at the shore.',
+            set = function(key, value, startup)
+                ConExecute('ren_WaterDetail ' .. tostring(value))
+            end,
+            custom = {
+                states = {
+                    { text = '<LOC _On>', key = 1 },
+                    { text = '<LOC _Off>', key = 0 },
+                },
+            },
+        })
+    end
+end
+
 -- Texture filtering (ren_TextureAnisotropy), on Direct3D 12 and Vulkan: anisotropic filtering for the tiled ground
 -- and unit textures. Shown only by an engine that has the command, as the ones below.
 do
@@ -821,5 +869,51 @@ do
                 },
             },
         })
+    end
+end
+
+-- The interface scale without a restart, and following the display (/fafengine/modules/lua/ui/uiscale.lua). FAF's UI
+-- Scale entry asked for a restart; here it applies at once. "Match display scale" after it sets UI Scale from the scale
+-- of the display the game window is on. Only on an engine that reports that scale (GetDisplayScale).
+do
+    if rawget(_G, 'GetDisplayScale') then
+        local UiScale = import('/fafengine/modules/lua/ui/uiscale.lua')
+        for _, tab in options do
+            local items = type(tab) == 'table' and tab.items
+            if items then
+                for index, item in items do
+                    if item.key == 'ui_scale' then
+                        item.restart = nil
+                        item.set = function(key, value, startup)
+                            if not startup and type(value) == 'number' then
+                                UiScale.OnChosen(value)
+                            end
+                        end
+                        if not HasOptionKey(items, 'ui_scale_auto') then
+                            table.insert(items, index + 1, {
+                                title = "Match display scale",
+                                key = 'ui_scale_auto',
+                                type = 'toggle',
+                                -- Reset to defaults follows the display; a profile without the setting yet gets
+                                -- it from uiscale.lua's StartupScale (on for UI Scale unset or 100 %).
+                                default = true,
+                                set = function(key, value, startup)
+                                    if not startup then
+                                        UiScale.OnFollowChosen(value == true)
+                                    end
+                                end,
+                                custom = {
+                                    states = {
+                                        { text = "<LOC _On>", key = true },
+                                        { text = "<LOC _Off>", key = false },
+                                    },
+                                },
+                            })
+                        end
+                        break
+                    end
+                end
+            end
+        end
     end
 end
